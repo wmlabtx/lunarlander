@@ -21,6 +21,7 @@ $t = 0.0                # время (сек)
 $dt = 0.1               # шаг симуляции (сек)
 
 # Параметры двигателя
+
 $throttle_lag = 2.0          # задержка зажигания двигателя (сек)
 $throttle_interval = 0.5     # минимальный интервал между изменениями тяги (сек)
 $throttle_cooldown = 0.0     # таймер до следующего разрешённого изменения
@@ -81,9 +82,7 @@ function Format-Bar {
     return $bar
 }
 
-# Функция целевой скорости (V_target) в зависимости от высоты (h)
-# При постоянной тяге: v² = v₀² + 2a(h - h₀) (кинематика)
-# Это парабола в координатах (h, v²)
+# Функция целевой скорости (v_target) в зависимости от высоты (h)
 
 function Get-TargetVelocity($currentH) {
     # Контрольные точки для расчета эффективного ускорения
@@ -97,14 +96,14 @@ function Get-TargetVelocity($currentH) {
     $v_low = -0.7
 
     $h_landing = $h_shutdown   # 1.7 м - касание щупов
-    $v_landing = -0.5          # Реальная скорость Apollo 11 при касании щупов
+    $v_landing = -0.5          # реальная скорость Apollo 11 при касании щупов
 
     # Граничные условия
     if ($currentH -ge $h_high) { return $v_high }
     if ($currentH -le $h_landing) { return $v_landing }
 
-    # Фаза 1: Braking (2300→150 м)
-    # Быстрое торможение от орбитальной скорости
+    # фаза 1
+    # быстрое торможение от орбитальной скорости
     if ($currentH -ge $h_mid) {
         # a = (v_mid² - v_high²) / (2(h_mid - h_high))
         $v_high_sq = $v_high * $v_high
@@ -121,8 +120,8 @@ function Get-TargetVelocity($currentH) {
         }
     }
 
-    # Фаза 2: Approach (150→10 м)
-    # Умеренное снижение, выбор места посадки
+    # фаза 2
+    # cнижение, выбор места посадки
     elseif ($currentH -ge $h_low) {
         $v_mid_sq = $v_mid * $v_mid
         $v_low_sq = $v_low * $v_low
@@ -137,8 +136,8 @@ function Get-TargetVelocity($currentH) {
         }
     }
 
-    # Фаза 3: Landing (10→1.7 м)
-    # Финальное зависание перед касанием щупов
+    # фаза 3
+    # зависание перед касанием щупов
     else {
         $v_low_sq = $v_low * $v_low
         $v_landing_sq = $v_landing * $v_landing
@@ -163,62 +162,63 @@ $m_fuel = $m_fuel_start
 while ($h -gt 0) {
     $m_total = $m_dry + $m_fuel
 
-    # Проверка касания щупов (Contact Light)
+    # проверка касания щупов
     if (-not $contact_light -and $h -le $h_shutdown) {
         $contact_light = $true
         $contact_timer = 0.0
     }
 
-    # Обновление таймера после касания щупов
+    # обновление таймера после касания щупов
     if ($contact_light) {
         $contact_timer += $dt
     }
 
-    # Определяем желаемую скорость на основе высоты
+    # определяем желаемую скорость на основе высоты
     $v_target = Get-TargetVelocity $h
-    # Плавно подгоняем реальную скорость под целевую
+    
+    # плавно подгоняем реальную скорость под целевую
     $velocity_error = $v_target - $v
 
-    # Расчет тяги для компенсации веса
+    # расчет тяги для компенсации веса
     $hover_thrust = $m_total * $g_moon
 
-    # Добавочная тяга для изменения скорости
-    $kp = 2500.0  # "Чувствительность рук пилота"
+    # добавочная тяга для изменения скорости
+    $kp = 2500.0
     $required_thrust = $hover_thrust + ($velocity_error * $kp)
 
-    # В целых долях (0-100)
+    # в целых долях (0-100)
     [int]$t_pct_target = [Math]::Round($required_thrust * 100 / $t_max)
 
-    # Проверка: нужно ли начать процедуру выключения
+    # проверка: нужно ли начать процедуру выключения
     $should_shutdown = $false
     if ($contact_light -and $contact_timer -ge $shutdown_delay) {
         $should_shutdown = $true
     }
 
-    # Если требуется малая или нулевая тяга - выключаем двигатель
+    # если требуется малая или нулевая тяга - выключаем двигатель
     if ($t_pct_target -eq 0 -or $t_pct_target -lt $t_min_pct) {
         $t_pct_target = 0
         $should_shutdown = $true
     }
     else {
         if ($t_pct -eq 0) {
-            # Первое включение двигателя после зажигания - начинаем с минимума $t_min_pct
+            # первое включение двигателя после зажигания - начинаем с минимума $t_min_pct
             $t_pct_target = $t_min_pct
         }
         else {
             if ($t_pct -eq 100) {
-                # Если текущая тяга 100%, а нужно меньше, снижаем сразу до $t_max_pct
+                # если текущая тяга 100%, а нужно меньше, снижаем сразу до $t_max_pct
                 if ($t_pct_target -lt $t_max_pct) {
                     $t_pct_target = $t_max_pct
                 }
                 else {
-                    # Если нужно больше 100%, остаёмся на 100%
+                    # если нужно больше 100%, остаёмся на 100%
                     $t_pct_target = 100
                 }
             }
             else {
                 if ($t_pct -eq $t_max_pct) {
-                    # Если текущая тяга $t_max_pct, а нужно больше, переходим на 100%
+                    # если текущая тяга $t_max_pct, а нужно больше, переходим на 100%
                     if ($t_pct_target -gt $t_max_pct) {
                         $t_pct_target = 100
                     }
@@ -228,19 +228,19 @@ while ($h -gt 0) {
                     }
                 }
                 else {
-                    # Текущая тяга между $t_min_pct и $t_max_pct
+                    # текущая тяга между $t_min_pct и $t_max_pct
                     if ($t_pct_target -gt $t_max_pct) {
-                        # Нужно больше $t_max_pct, целимся сначала в $t_max_pct
+                        # нужно больше $t_max_pct, целимся сначала в $t_max_pct
                         $t_pct_target = $t_max_pct
                     }
 
                     if ($t_pct_target -gt $t_pct) {
-                        # Нужно увеличить тягу
+                        # нужно увеличить тягу
                         $t_delta = [Math]::Min($t_pct_target - $t_pct, $t_step_pct)
                         $t_pct_target = $t_pct + $t_delta
                     }
                     else {
-                        # Нужно уменьшить тягу
+                        # нужно уменьшить тягу
                         $t_delta = [Math]::Min($t_pct - $t_pct_target, $t_step_pct)
                         $t_pct_target = $t_pct - $t_delta
                     }
@@ -249,8 +249,7 @@ while ($h -gt 0) {
         }
     }
 
-    # Устанавливаем команду управления двигателем
-    # Изменение тяги - не чаще $throttle_interval
+    # изменение тяги - не чаще $throttle_interval
     if ($throttle_cooldown -le 0) {
         $t_pct_commanded = $t_pct_target
         $throttle_cooldown = $throttle_interval
@@ -258,50 +257,52 @@ while ($h -gt 0) {
     $throttle_cooldown -= $dt
 
     if ($m_fuel -le 0) {
-        # Нет топлива - принудительное выключение
+        # нет топлива - принудительное выключение
         $should_shutdown = $true
         $m_fuel = 0;
     }
 
-    # Машина состояний двигателя: off / igniting / running / shutdown
+    # машина состояний двигателя: off / igniting / running / shutdown
     if ($engine_state -eq "off") {
-        # Двигатель выключен
+        # двигатель выключен
         if ($t_pct_commanded -gt 0 -and -not $should_shutdown) {
-            # Начинаем зажигание
+            # начинаем зажигание
             $engine_state = "igniting"
             $ignition_timer = 0.0
         }
+
         $t_pct = 0
 
     } elseif ($engine_state -eq "igniting") {
-        # Процесс зажигания
+        # процесс зажигания
         $ignition_timer += $dt
         if ($ignition_timer -ge $throttle_lag) {
             $engine_state = "running"
         }
+        
         $t_pct = 0
 
     } elseif ($engine_state -eq "running") {
-        # Двигатель работает
+        # двигатель работает
         if ($should_shutdown) {
-            # Начинаем процедуру выключения
+            # начинаем процедуру выключения
             $engine_state = "shutdown"
             $shutdown_timer = 0.0
             $t_pct_at_shutdown = $t_pct
         } else {
-            # Нормальная работа
+            # нормальная работа
             $t_pct = $t_pct_commanded
         }
 
     } elseif ($engine_state -eq "shutdown") {
-        # Процесс выключения - тяга остаётся постоянной
+        # процесс выключения - тяга остаётся постоянной
         $shutdown_timer += $dt
         if ($shutdown_timer -ge $shutdown_thrust_decay) {
-            # Выключение завершено - мгновенное падение до 0
+            # выключение завершено - мгновенное падение до 0
             $engine_state = "off"
             $t_pct = 0
         } else {
-            # Тяга остаётся на уровне начала выключения
+            # тяга остаётся на уровне начала выключения
             $t_pct = $t_pct_at_shutdown
         }
     }
@@ -372,7 +373,7 @@ while ($h -gt 0) {
 [Console]::CursorVisible = $true
 
 # Финальное состояние: модуль стоит на грунте
-# Грунт обеспечивает силу реакции опоры, равную весу модуля
+
 $h_final = 0.0
 $v_final = 0.0
 $t_pct_final = 0
@@ -380,6 +381,7 @@ $t_pct_final = 0
 $g_force_final = $g_moon / $g_earth
 
 # Обновляем финальный дисплей
+
 [Console]::SetCursorPosition(0, 1)
 
 Write-Host ("ВЫСОТА:     {0,6:F1} м   " -f $h_final) -NoNewline -ForegroundColor White
@@ -406,42 +408,42 @@ Write-Host "ДВИГАТЕЛЬ: " -NoNewline -ForegroundColor White
 Write-Host ([char]0x25CB + " Выключен  ") -ForegroundColor DarkGray
 
 Write-Host ""
-
 Write-Host ("Скорость в момент посадки: {0,7:F2} м/с" -f $v)
 Write-Host ("Максимальная скорость:     {0,7:F2} м/с" -f $max_v)
 Write-Host ("Посадка заняла:            {0,7:F2} сек" -f $t)
 Write-Host ("Израсходовано топлива:     {0,7:F2} кг" -f ($m_fuel_start - $m_fuel))
 Write-Host ("Максимальное ускорение:    {0,7:F2} g" -f $max_g)
+Write-Host ""
 
 # Генерация PNG графика телеметрии
 
-Write-Host "`nГенерация графика..." -ForegroundColor Cyan
+Write-Host "Генерация графика..." -ForegroundColor Cyan
 
 Add-Type -AssemblyName System.Drawing
 
-# Вычисляем ширину графика на основе времени посадки
-# Каждая секунда = $pps пикселей
+
+# каждая секунда = $pps пикселей
 $pps = 3
 $graphWidth = [int]($t * $pps)
 
-# Отступы
+# отступы
 $marginLeft = 60   # для подписей оси Y
 $marginRight = 20  # минимальный отступ справа
 $marginBottom = 30 # для подписей оси X
 
-# Общая ширина и высота изображения
+# общая ширина и высота изображения
 $imgWidth = $graphWidth + $marginLeft + $marginRight
 $imgHeight = 390 + $marginBottom  # последний график заканчивается на y=390 (310+80)
 
-# Создаём bitmap и graphics
+# создаём bitmap и graphics
 $bmp = New-Object System.Drawing.Bitmap($imgWidth, $imgHeight)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
 
-# Фон
+# фон
 $g.Clear([System.Drawing.Color]::FromArgb(20, 30, 40))
 
-# Шрифты и кисти
+# шрифты и кисти
 $fontNormal = New-Object System.Drawing.Font("Consolas",16)
 $fontSmall = New-Object System.Drawing.Font("Consolas", 10)
 $brushWhite = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
@@ -452,7 +454,7 @@ $brushCyan = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::Cyan)
 $brushYellow = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::Yellow)
 $brushRed = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::Red)
 
-# Перья для графиков
+# перья для графиков
 $penGrid = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(50, 60, 70), 1)
 $penTick = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(40, 50, 55), 1)
 $penOff = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60, 60, 60), 2)
@@ -464,23 +466,23 @@ $penG = New-Object System.Drawing.Pen([System.Drawing.Color]::LimeGreen, 2)
 $penMoonG = New-Object System.Drawing.Pen([System.Drawing.Color]::Orange, 2)
 $penMoonG.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
 
-# Функция рисования оси времени (мелкие засечки + крупные с подписями)
+# функция рисования оси времени (мелкие засечки + крупные с подписями)
 function New-TimeAxis {
     param($graphics, $x, $y, $width, $height, $tTotal)
 
-    # Мелкие засечки каждую секунду (короткие линии снизу графика)
+    # мелкие засечки каждую секунду (короткие линии снизу графика)
     for ($ts = 1; $ts -lt $tTotal; $ts++) {
         $xPos = $x + ($ts / $tTotal) * $width
         $graphics.DrawLine($penTick, $xPos, $y + $height - 4, $xPos, $y + $height)
     }
 
-    # Сетка каждые 10 секунд
+    # сетка каждые 10 секунд
     for ($ts = 10; $ts -lt $tTotal; $ts += 10) {
         $xPos = $x + ($ts / $tTotal) * $width
         $graphics.DrawLine($penTick, $xPos, $y, $xPos, $y + $height)
     }
 
-    # Крупные засечки с подписями каждые 10 секунд
+    # крупные засечки с подписями каждые 10 секунд
     for ($ts = 10; $ts -lt $tTotal; $ts += 10) {
         $xPos = $x + ($ts / $tTotal) * $width
         $graphics.DrawLine($penGrid, $xPos, $y, $xPos, $y + $height)
@@ -488,7 +490,7 @@ function New-TimeAxis {
     }
 }
 
-# Функция для рисования графика
+# функция для рисования графика
 
 function New-Graph {
     param(
@@ -496,16 +498,13 @@ function New-Graph {
         $minVal, $maxVal, $pen, $title, $unit
     )
 
-    # Рамка графика
-
+    # рамка графика
     $graphics.DrawRectangle($penGrid, $x, $y, $width, $height)
 
-    # Заголовок графика
-
+    # заголовок графика
     $graphics.DrawString($title, $fontNormal, $brushWhite, $x, $y - 24)
 
-    # Сетка
-
+    # сетка
     for ($i = 0; $i -le 5; $i++) {
         $yPos = $y + ($height / 5) * $i
         $graphics.DrawLine($penGrid, $x, $yPos, $x + $width, $yPos)
@@ -513,21 +512,23 @@ function New-Graph {
         $graphics.DrawString("{0:F1}$unit" -f $val, $fontSmall, $brushGray, $x - 50, $yPos - 9)
     }
 
-    # Извлекаем значения
-
+    # извлекаем значения
     $points = $data | Select-Object -ExpandProperty $property
     $timePoints = $data | Select-Object -ExpandProperty Time
 
-    if ($points.Count -lt 2) { return }
+    if ($points.Count -lt 2) { 
+        return 
+    }
 
-    # Метки по оси X (секунды)
+    # метки по оси X (секунды)
     New-TimeAxis $graphics $x $y $width $height $timePoints[-1]
 
     $range = $maxVal - $minVal
-    if ($range -eq 0) { $range = 1 }
+    if ($range -eq 0) { 
+        $range = 1 
+    }
 
-    # Рисуем линию графика
-
+    # рисуем линию графика
     for ($i = 0; $i -lt ($points.Count - 1); $i++) {
         $t1 = $timePoints[$i]
         $t2 = $timePoints[$i + 1]
@@ -543,17 +544,18 @@ function New-Graph {
     }
 }
 
-# График 1: Высота (с раскраской по состоянию двигателя)
+# график 1: высота (с раскраской по состоянию двигателя)
 
 $graphX = $marginLeft
 $graphY = 30
+
 # $graphWidth уже вычислен выше на основе времени посадки
 $graphHeight = 240
 
 $g.DrawRectangle($penGrid, $graphX, $graphY, $graphWidth, $graphHeight)
 $g.DrawString("ВЫСОТА", $fontNormal, $brushWhite, $graphX, $graphY - 24)
 
-# Сетка для графика высоты
+# сетка для графика высоты
 for ($i = 0; $i -le 5; $i++) {
     $yPos = $graphY + ($graphHeight / 5) * $i
     $g.DrawLine($penGrid, $graphX, $yPos, $graphX + $graphWidth, $yPos)
@@ -561,12 +563,11 @@ for ($i = 0; $i -le 5; $i++) {
     $g.DrawString("{0:F0}м" -f $val, $fontSmall, $brushGray, $graphX - 50, $yPos - 9)
 }
 
-# Ось времени для графика высоты
+# ось времени для графика высоты
 $tTotal = ($history | Select-Object -ExpandProperty Time)[-1]
 New-TimeAxis $g $graphX $graphY $graphWidth $graphHeight $tTotal
 
-# Рисуем линию высоты с раскраской по состоянию двигателя
-
+# рисуем линию высоты с раскраской по состоянию двигателя
 $points = $history | Select-Object -ExpandProperty Height
 $timePoints = $history | Select-Object -ExpandProperty Time
 $engineStates = $history | Select-Object -ExpandProperty EngineState
@@ -585,8 +586,7 @@ for ($i = 0; $i -lt ($points.Count - 1); $i++) {
     $y1 = $graphY + $graphHeight - ($h1 / $h_start) * $graphHeight
     $y2 = $graphY + $graphHeight - ($h2 / $h_start) * $graphHeight
 
-    # Выбираем перо в зависимости от состояния двигателя и тяги
-
+    # выбираем перо в зависимости от состояния двигателя и тяги
     $pen = $penOff
     if ($state -eq "igniting") {
         $pen = $penIgniting
@@ -605,8 +605,7 @@ for ($i = 0; $i -lt ($points.Count - 1); $i++) {
     $g.DrawLine($pen, $x1, $y1, $x2, $y2)
 }
 
-# Статистика в правом верхнем углу графика высоты
-
+# статистика в правом верхнем углу графика высоты
 $statsX = $graphX + $graphWidth - 200
 $statsY = $graphY + 10
 $g.DrawString("СТАТИСТИКА ПОЛЁТА", $fontSmall, $brushWhite, $statsX, $statsY)
@@ -616,8 +615,7 @@ $g.DrawString(("Макс g:   {0,5:F2} g" -f $max_g), $fontSmall, $brushYellow, 
 $g.DrawString(("Макс V:   {0,5:F2} м/с" -f $max_v), $fontSmall, $brushWhite, $statsX, $statsY + 72)
 $g.DrawString(("Касание:  {0,5:F2} м/с" -f $v), $fontSmall, $brushWhite, $statsX, $statsY + 90)
 
-# Легенда состояний двигателя
-
+# легенда состояний двигателя
 $legendX = $graphX + 10
 $legendY = $graphY + $graphHeight - 90
 $g.DrawLine($penOff, $legendX, $legendY, $legendX + 20, $legendY)
@@ -633,45 +631,43 @@ $g.DrawString("Выключение", $fontSmall, $brushWhite, $legendX + 25, $l
 
 # График 2: Ускорение
 
-# Рисуем линию лунного g (до отрисовки самого графика)
+# рисуем линию лунного g (до отрисовки самого графика)
 $gGraphX = $marginLeft
 $gGraphY = 310
 $gGraphWidth = $graphWidth
 $gGraphHeight = 80
 $gMinVal = 0
+
 # Округляем до одной цифры после запятой в большую сторону
 $gMaxVal = [Math]::Ceiling($max_g * 10) / 10
 $gRange = $gMaxVal - $gMinVal
 
-# Вычисляем Y-координату для линии лунного g
-# Переводим лунное g из м/с² в земные g
+# переводим лунное g из м/с² в земные g
 $moonG_in_earth_g = $g_moon / $g_earth
 $moonG_normalized = ($moonG_in_earth_g - $gMinVal) / $gRange
 $moonG_y = $gGraphY + $gGraphHeight - ($moonG_normalized * $gGraphHeight)
 
-# Рисуем пунктирную линию
+# рисуем пунктирную линию
 $g.DrawLine($penMoonG, $gGraphX, $moonG_y, $gGraphX + $gGraphWidth, $moonG_y)
 
-# Подпись "Лунное g"
+# подпись "g"
 $g.DrawString("g", $fontSmall, $brushGray, $gGraphX + 5, $moonG_y - 18)
 
 New-Graph $g $history "G" $gGraphX $gGraphY $gGraphWidth $gGraphHeight $gMinVal $gMaxVal $penG "УСКОРЕНИЕ" "g"
 
 # Сохранение
+
 $outputPath = Join-Path $PSScriptRoot "mode1.png"
 
 try {
     $bmp.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Png)
 
-    # Очистка
+    # очистка
     $g.Dispose()
     $bmp.Dispose()
 
     if (Test-Path $outputPath) {
         Write-Host ("График сохранён: " + $outputPath) -ForegroundColor Green
-
-        # Открыть файл (опционально)
-        # Start-Process $outputPath
     } else {
         Write-Host "Ошибка: файл не был создан" -ForegroundColor Red
     }
