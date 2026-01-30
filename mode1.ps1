@@ -4,7 +4,10 @@ $g_moon = 1.62          # лунное g (м/с²)
 $g_earth = 9.80665      # земное g (м/с²)
 $m_dry = 2000.0         # масса посадочного модуля без топлива (кг)
 $v_e = 3050.0           # эффективная скорость истечения реактивной струи (м/с)
-$T_max = 15000.0        # максимальная тяга двигателя (Н)
+$t_max = 15000.0        # максимальная тяга двигателя (Н)
+$t_min_pct = 10         # минимальная тяга двигателя (%)
+$t_max_pct = 60         # максимально регулируемая тяга двигателя (%)
+$t_step_pct = 5         # шаг изменения тяги двигателя (%)
 $a_limit_earth_g = 3.0  # ограничение по перегрузке (в земных g)
 
 # Стартовые условия
@@ -12,14 +15,18 @@ $a_limit_earth_g = 3.0  # ограничение по перегрузке (в �
 $h_start = 1000.0       # начальная высота (м)
 $v = 0.0                # начальная скорость (м/с)
 $m_fuel_start = 1000.0  # начальная масса топлива (кг)
+$t_pct_start = 0        # начальная тяга (%)
 $t = 0.0                # время (сек)
 $dt = 0.1               # шаг симуляции (сек)
 
 # Параметры двигателя
-$throttle_lag = 2.0     # задержка зажигания двигателя (сек)
-$engine_state = "off"   # состояние: off / igniting / running
-$ignition_timer = 0.0   # таймер зажигания
-$thrust_pct = 0.0       # реальная тяга (0.0 - 1.0)
+$throttle_lag = 2.0       # задержка зажигания двигателя (сек)
+$throttle_interval = 0.5  # минимальный интервал между изменениями тяги (сек)
+$throttle_cooldown = 0.0  # таймер до следующего разрешённого изменения
+$engine_state = "off"     # состояние: off / igniting / running
+$ignition_timer = 0.0     # таймер зажигания
+$t_pct = $t_pct_start     # текущая реальная тяга в процентах, целое число (0 - 100)
+
 
 # Телеметрия и история
 
@@ -66,6 +73,62 @@ function Format-Bar {
     return $bar
 }
 
+# Функция целевой скорости (V_target) в зависимости от высоты (h)
+# Использует параметрическую кубическую интерполяцию через три точки
+
+function Get-TargetVelocity($currentH) {
+    # Опорные точки (высота, скорость)
+    $h_high = 2300.0      # высокая высота
+    $h_mid  = 150.0       # средняя высота
+    $h_landing = 10.0     # высота финального подхода
+
+    $v_high = -45.0       # быстрое снижение
+    $v_mid  = -4.5        # умеренное снижение
+    $v_landing = -1.0     # безопасная скорость касания
+
+    # Граничные условия
+    if ($currentH -ge $h_high) { return $v_high }
+    if ($currentH -le $h_landing) { return $v_landing }
+
+    # Нормализуем высоту к параметру t ∈ [0, 1]
+    # t=0 при h_landing, t=1 при h_high
+    $t = ($currentH - $h_landing) / ($h_high - $h_landing)
+
+    # Параметр средней точки
+    $t_mid = ($h_mid - $h_landing) / ($h_high - $h_landing)
+
+    # Наклон в средней точке (Catmull-Rom): dv/dt = (v_high - v_landing) / (1 - 0)
+    $slope_mid = $v_high - $v_landing
+
+    # Кусочная кубическая интерполация Hermite
+    # Тангенсы масштабируются по длине сегмента в локальных координатах
+    if ($t -le $t_mid) {
+        # Нижний сегмент: от landing до mid
+        $t_local = $t / $t_mid
+        $h0 = $v_landing
+        $h1 = $v_mid
+        $m0 = 0                      # нулевой наклон внизу (плавный заход)
+        $m1 = $slope_mid * $t_mid    # масштабированный тангенс
+    } else {
+        # Верхний сегмент: от mid до high
+        $t_local = ($t - $t_mid) / (1 - $t_mid)
+        $h0 = $v_mid
+        $h1 = $v_high
+        $m0 = $slope_mid * (1 - $t_mid)  # масштабированный тангенс
+        $m1 = 0                           # нулевой наклон вверху
+    }
+
+    $t2 = $t_local * $t_local
+    $t3 = $t2 * $t_local
+
+    $h00 = 2*$t3 - 3*$t2 + 1
+    $h10 = $t3 - 2*$t2 + $t_local
+    $h01 = -2*$t3 + 3*$t2
+    $h11 = $t3 - $t2
+
+    return $h00 * $h0 + $h10 * $m0 + $h01 * $h1 + $h11 * $m1
+}
+
 # Симуляция посадки
 
 $h = $h_start
@@ -75,37 +138,94 @@ $m_fuel = $m_fuel_start
 while ($h -gt 0) {
     $m_total = $m_dry + $m_fuel
 
-    # Определяем целевую скорость на основе формулы оптимального торможения
-    # v = sqrt(2*g*h) * коэффициент (0.3 = более агрессивное снижение)
-    $v_target = -[Math]::Sqrt(2.0 * $g_moon * ($h + 0.5)) * 0.3
+    # Определяем желаемую скорость (V_target) на основе высоты
+    $v_target = Get-TargetVelocity $h
+    # Плавно подгоняем реальную скорость под целевую
+    $velocity_error = $v_target - $v
 
-    # Вычисляем КОМАНДНУЮ тягу от автопилота
-    if ($v -gt $v_target) {
-        $thrust_pct_commanded = 0.0
-    } else {
-        # Вычисляем ошибку скорости
-        $verror = $v_target - $v
+    # Расчет тяги для компенсации веса (hover thrust)
+    $hover_thrust = $m_total * $g_moon
 
-        # Вычисляем необходимую тягу
-        $hover_thrust = $m_total * $g_moon
+    # Добавочная тяга для изменения скорости
+    $kp = 2500.0  # "Чувствительность рук пилота"
+    $required_thrust = $hover_thrust + ($velocity_error * $kp)
 
-        # Добавляем пропорциональную тягу
-        $kp = 1800.0
-        $target_thrust = $hover_thrust + ($verror * $kp)
+    # В целых долях (0-100)
+    [int]$t_pct_target = [Math]::Round($required_thrust * 100 / $t_max)
 
-        # Ограничение макс перегрузка 1g
-        $t_limit_g = $m_total * (1.0 * $g_earth + $g_moon)
+    # Если требуется малая или нулевая тяга - выключаем двигатель
+    if ($t_pct_target -eq 0 -or $t_pct_target -lt $t_min_pct) {
+        # Выключаем двигатель без задержки
+        $t_pct_target = 0
+    }
+    else {
+        if ($t_pct -eq 0) {
+            # Первое включение двигателя после зажигания - начинаем с минимума $t_min_pct
+            $t_pct_target = $t_min_pct
+        }
+        else {
+            if ($t_pct -eq 100) {
+                # Если текущая тяга 100%, а нужно меньше, снижаем сразу до $t_max_pct
+                if ($t_pct_target -lt $t_max_pct) {
+                    $t_pct_target = $t_max_pct
+                }
+                else {
+                    # Если нужно больше 100%, остаёмся на 100%
+                    $t_pct_target = 100
+                }
+            }
+            else {
+                if ($t_pct -eq $t_max_pct) {
+                    # Если текущая тяга $t_max_pct, а нужно больше, переходим на 100%
+                    if ($t_pct_target -gt $t_max_pct) {
+                        $t_pct_target = 100
+                    }
+                    else {
+                        $t_delta = [Math]::Min($t_pct - $t_pct_target, $t_step_pct)
+                        $t_pct_target = $t_pct - $t_delta
+                    }
+                }
+                else {
+                    # Текущая тяга между $t_min_pct и $t_max_pct
+                    if ($t_pct_target -gt $t_max_pct) {
+                        # Нужно больше $t_max_pct, целимся сначала в $t_max_pct
+                        $t_pct_target = $t_max_pct
+                    }
 
-        $final_thrust = [Math]::Min($target_thrust, $T_max)
-        $final_thrust = [Math]::Min($final_thrust, $t_limit_g)
-
-        $thrust_pct_commanded = [Math]::Max(0.0, $final_thrust / $T_max)
+                    if ($t_pct_target -gt $t_pct) {
+                        # Нужно увеличить тягу
+                        $t_delta = [Math]::Min($t_pct_target - $t_pct, $t_step_pct)
+                        $t_pct_target = $t_pct + $t_delta
+                    }
+                    else {
+                        # Нужно уменьшить тягу
+                        $t_delta = [Math]::Min($t_pct - $t_pct_target, $t_step_pct)
+                        $t_pct_target = $t_pct - $t_delta
+                    }
+                }
+            }
+        }
     }
 
-    if ($m_fuel -le 0) { $thrust_pct_commanded = 0; $m_fuel = 0 }
+    # Устанавливаем команду управления двигателем
+    # Выключение - всегда мгновенно, изменение тяги - не чаще $throttle_interval
+    if ($t_pct_target -eq 0) {
+        $t_pct_commanded = 0
+        $throttle_cooldown = 0.0
+    } elseif ($throttle_cooldown -le 0) {
+        $t_pct_commanded = $t_pct_target
+        $throttle_cooldown = $throttle_interval
+    }
+    $throttle_cooldown -= $dt
+
+    if ($m_fuel -le 0) { 
+        # Нет топлива - двигатель выключен
+        $t_pct_commanded = 0; 
+        $m_fuel = 0; 
+    }
 
     # Симуляция состояний двигателя с задержкой зажигания
-    if ($thrust_pct_commanded -gt 0.01) {
+    if ($t_pct_commanded -gt 0) {
         if ($engine_state -eq "off") {
             # Начинаем зажигание
             $engine_state = "igniting"
@@ -125,45 +245,45 @@ while ($h -gt 0) {
 
     # На самом деле реальная тяга зависит от состояния двигателя
     if ($engine_state -eq "running") {
-        $thrust_pct = $thrust_pct_commanded
+        $t_pct = $t_pct_commanded
     } else {
-        $thrust_pct = 0.0
+        $t_pct = 0
     }
 
-    $T_current = $thrust_pct * $T_max
-    $dm = ($T_current / $v_e) * $dt
+    $t_current = ($t_pct / 100.0) * $t_max
+    $dm = ($t_current / $v_e) * $dt
     $m_fuel -= $dm
 
-    $a_current = ($T_current / $m_total) - $g_moon
+    $a_current = ($t_current / $m_total) - $g_moon
     $v += $a_current * $dt
     $h += $v * $dt
     $t += $dt
 
     # Сохранение телеметрии
 
-    $g_force = ($T_current / $m_total) / $g_earth
+    $g_force = ($t_current / $m_total) / $g_earth
     if ($g_force -gt $max_g) { $max_g = $g_force }
 
     $history.Add([PSCustomObject]@{
-        Time = $t; Height = $h; Velocity = $v; Thrust = $thrust_pct; G = $g_force; Fuel = $m_fuel; EngineState = $engine_state
+        Time = $t; Height = $h; Velocity = $v; Thrust = $t_pct; G = $g_force; Fuel = $m_fuel; EngineState = $engine_state
     })
 
     [Console]::SetCursorPosition(0, 1)
 
-    $color = if ($h -lt -50) { "Red" } elseif ($v -lt -100) { "Yellow" } else { "Green" }
+    $color = if ($h -lt 50) { "Red" } elseif ($h -lt 200) { "Yellow" } else { "Green" }
     Write-Host ("ВЫСОТА:     {0,6:F1} м   " -f $h) -NoNewline -ForegroundColor $color
     $hBar = Format-Bar $h $h_start 15
     Write-Host $hBar -ForegroundColor $color
 
     $vAbs = [Math]::Abs($v)
-    $color = if ($vAbs -lt -50) { "Red" } elseif ($vAbs -lt -20) { "Yellow" } else { "Green" }
+    $color = if ($vAbs -gt 50) { "Red" } elseif ($vAbs -gt 20) { "Yellow" } else { "Green" }
     Write-Host ("СКОРОСТЬ:   {0,6:F1} м/с " -f $v) -NoNewline -ForegroundColor $color
-    $vBar = Format-Bar $vAbs $m_fuel_start 15
+    $vBar = Format-Bar $vAbs 60.0 15
     Write-Host $vBar -ForegroundColor $color
 
-    $color = if ($thrust_pct -lt 0.1) { "White" } elseif ($thrust_pct -lt 0.9) { "Yellow" } else { "Red" }
-    Write-Host ("ТЯГА:       {0,6:F1}%    " -f ($thrust_pct*100)) -NoNewline -ForegroundColor $color
-    $tBar = Format-Bar $thrust_pct 1.0 15
+    $color = if ($t_pct -lt 10) { "White" } elseif ($t_pct -lt 90) { "Yellow" } else { "Red" }
+    Write-Host ("ТЯГА:       {0,6:F1}%    " -f ($t_pct)) -NoNewline -ForegroundColor $color
+    $tBar = Format-Bar $t_pct 100.0 15
     Write-Host $tBar -ForegroundColor $color
 
     $color = if ($g_force -gt 2.0) { "Red" } elseif ($g_force -gt 0.5) { "Green" } else { "White" }
@@ -226,7 +346,7 @@ $brushYellow = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::Yell
 # Перья для графиков
 $penGrid = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(50, 60, 70), 1)
 $penOff = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60, 60, 60), 2)
-$penIgniting = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 3)
+$penIgniting = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 4)
 $penRunning = New-Object System.Drawing.Pen([System.Drawing.Color]::Yellow, 2)
 $penThrust = New-Object System.Drawing.Pen([System.Drawing.Color]::Cyan, 2)
 $penG = New-Object System.Drawing.Pen([System.Drawing.Color]::LimeGreen, 2)
@@ -351,7 +471,7 @@ $g.DrawString("Работает", $fontSmall, $brushYellow, $legendX + 25, $lege
 
 # График 2: Тяга
 
-New-Graph $g $history "Thrust" $margin 310 ($imgWidth - 2*$margin) 80 0 1.0 $penThrust "ТЯГА" "%"
+New-Graph $g $history "Thrust" $margin 310 ($imgWidth - 2*$margin) 80 0 100.0 $penThrust "ТЯГА" "%"
 
 # График 3: Перегрузка
 
