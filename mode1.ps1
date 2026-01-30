@@ -13,7 +13,7 @@ $a_limit_earth_g = 3.0  # ограничение по перегрузке (в �
 # Стартовые условия
 
 $h_start = 2000.0       # начальная высота (м)
-$h_shutdown = 1.0       # высота отключения двигателя (м)
+$h_shutdown = 1.7       # высота отключения двигателя (м)
 $v = 0.0                # начальная скорость (м/с)
 $m_fuel_start = 1000.0  # начальная масса топлива (кг)
 $t_pct_start = 0        # начальная тяга (%)
@@ -21,12 +21,18 @@ $t = 0.0                # время (сек)
 $dt = 0.1               # шаг симуляции (сек)
 
 # Параметры двигателя
-$throttle_lag = 2.0       # задержка зажигания двигателя (сек)
-$throttle_interval = 0.5  # минимальный интервал между изменениями тяги (сек)
-$throttle_cooldown = 0.0  # таймер до следующего разрешённого изменения
-$engine_state = "off"     # состояние: off / igniting / running
-$ignition_timer = 0.0     # таймер зажигания
-$t_pct = $t_pct_start     # текущая реальная тяга в процентах, целое число (0 - 100)
+$throttle_lag = 2.0          # задержка зажигания двигателя (сек)
+$throttle_interval = 0.5     # минимальный интервал между изменениями тяги (сек)
+$throttle_cooldown = 0.0     # таймер до следующего разрешённого изменения
+$engine_state = "off"        # состояние: off / igniting / running / shutdown
+$ignition_timer = 0.0        # таймер зажигания
+$shutdown_delay = 0.4        # задержка от "Contact Light" до команды "Shutdown" (сек)
+$shutdown_thrust_decay = 2.8 # время спада тяги от текущей до 0 (сек)
+$contact_light = $false      # флаг касания щупов
+$contact_timer = 0.0         # таймер от касания щупов
+$shutdown_timer = 0.0        # таймер процесса выключения
+$t_pct_at_shutdown = 0       # тяга на момент начала выключения
+$t_pct = $t_pct_start        # текущая реальная тяга в процентах, целое число (0 - 100)
 
 
 # Телеметрия и история
@@ -76,61 +82,76 @@ function Format-Bar {
 }
 
 # Функция целевой скорости (V_target) в зависимости от высоты (h)
-# Использует параметрическую кубическую интерполяцию через три точки
+# При постоянной тяге: v² = v₀² + 2a(h - h₀) (кинематика)
+# Это парабола в координатах (h, v²)
 
 function Get-TargetVelocity($currentH) {
-    # Опорные точки (высота, скорость)
-    $h_high = 2300.0      # приближение
-    $h_mid  = 150.0       # ориентировка
-    $h_low = 10.0         # торможение
-    $h_landing = 
-    
+    # Контрольные точки для расчета эффективного ускорения
+    $h_high = 2300.0   
+    $v_high = -45.0    
 
-    $v_high = -45.0       # быстрое снижение
-    $v_mid  = -4.5        # замедление
-    $v_landing = -0.7     # скорость касания
+    $h_mid  = 150.0    
+    $v_mid  = -4.5     
+
+    $h_low = 10.0
+    $v_low = -0.7
+
+    $h_landing = $h_shutdown   # 1.7 м - касание щупов
+    $v_landing = -0.5          # Реальная скорость Apollo 11 при касании щупов
 
     # Граничные условия
     if ($currentH -ge $h_high) { return $v_high }
     if ($currentH -le $h_landing) { return $v_landing }
 
-    # Нормализуем высоту к параметру t ∈ [0, 1]
-    # t=0 при h_landing, t=1 при h_high
-    $t = ($currentH - $h_landing) / ($h_high - $h_landing)
+    # Фаза 1: Braking (2300→150 м)
+    # Быстрое торможение от орбитальной скорости
+    if ($currentH -ge $h_mid) {
+        # a = (v_mid² - v_high²) / (2(h_mid - h_high))
+        $v_high_sq = $v_high * $v_high
+        $v_mid_sq = $v_mid * $v_mid
+        $a_braking = ($v_mid_sq - $v_high_sq) / (2.0 * ($h_mid - $h_high))
 
-    # Параметр средней точки
-    $t_mid = ($h_mid - $h_landing) / ($h_high - $h_landing)
+        # v² = v_high² + 2a(h - h_high)
+        $v_sq = $v_high_sq + 2.0 * $a_braking * ($currentH - $h_high)
 
-    # Наклон в средней точке (Catmull-Rom): dv/dt = (v_high - v_landing) / (1 - 0)
-    $slope_mid = $v_high - $v_landing
-
-    # Кусочная кубическая интерполация Hermite
-    # Тангенсы масштабируются по длине сегмента в локальных координатах
-    if ($t -le $t_mid) {
-        # Нижний сегмент: от landing до mid
-        $t_local = $t / $t_mid
-        $h0 = $v_landing
-        $h1 = $v_mid
-        $m0 = 0                      # нулевой наклон внизу (плавный заход)
-        $m1 = $slope_mid * $t_mid    # масштабированный тангенс
-    } else {
-        # Верхний сегмент: от mid до high
-        $t_local = ($t - $t_mid) / (1 - $t_mid)
-        $h0 = $v_mid
-        $h1 = $v_high
-        $m0 = $slope_mid * (1 - $t_mid)  # масштабированный тангенс
-        $m1 = 0                           # нулевой наклон вверху
+        if ($v_sq -gt 0) {
+            return -[Math]::Sqrt($v_sq)
+        } else {
+            return $v_mid
+        }
     }
 
-    $t2 = $t_local * $t_local
-    $t3 = $t2 * $t_local
+    # Фаза 2: Approach (150→10 м)
+    # Умеренное снижение, выбор места посадки
+    elseif ($currentH -ge $h_low) {
+        $v_mid_sq = $v_mid * $v_mid
+        $v_low_sq = $v_low * $v_low
+        $a_approach = ($v_low_sq - $v_mid_sq) / (2.0 * ($h_low - $h_mid))
 
-    $h00 = 2*$t3 - 3*$t2 + 1
-    $h10 = $t3 - 2*$t2 + $t_local
-    $h01 = -2*$t3 + 3*$t2
-    $h11 = $t3 - $t2
+        $v_sq = $v_mid_sq + 2.0 * $a_approach * ($currentH - $h_mid)
 
-    return $h00 * $h0 + $h10 * $m0 + $h01 * $h1 + $h11 * $m1
+        if ($v_sq -gt 0) {
+            return -[Math]::Sqrt($v_sq)
+        } else {
+            return $v_low
+        }
+    }
+
+    # Фаза 3: Landing (10→1.7 м)
+    # Финальное зависание перед касанием щупов
+    else {
+        $v_low_sq = $v_low * $v_low
+        $v_landing_sq = $v_landing * $v_landing
+        $a_landing = ($v_landing_sq - $v_low_sq) / (2.0 * ($h_landing - $h_low))
+
+        $v_sq = $v_low_sq + 2.0 * $a_landing * ($currentH - $h_low)
+
+        if ($v_sq -gt 0) {
+            return -[Math]::Sqrt($v_sq)
+        } else {
+            return $v_landing
+        }
+    }
 }
 
 # Симуляция посадки
@@ -141,6 +162,17 @@ $m_fuel = $m_fuel_start
 [Console]::CursorVisible = $false
 while ($h -gt 0) {
     $m_total = $m_dry + $m_fuel
+
+    # Проверка касания щупов (Contact Light)
+    if (-not $contact_light -and $h -le $h_shutdown) {
+        $contact_light = $true
+        $contact_timer = 0.0
+    }
+
+    # Обновление таймера после касания щупов
+    if ($contact_light) {
+        $contact_timer += $dt
+    }
 
     # Определяем желаемую скорость на основе высоты
     $v_target = Get-TargetVelocity $h
@@ -157,10 +189,16 @@ while ($h -gt 0) {
     # В целых долях (0-100)
     [int]$t_pct_target = [Math]::Round($required_thrust * 100 / $t_max)
 
-    # Если требуется малая или нулевая тяга или рядом с поверхностью - выключаем двигатель
-    if ($t_pct_target -eq 0 -or $t_pct_target -lt $t_min_pct -or $h -le $h_shutdown) {
-        # Выключаем двигатель без задержки
+    # Проверка: нужно ли начать процедуру выключения
+    $should_shutdown = $false
+    if ($contact_light -and $contact_timer -ge $shutdown_delay) {
+        $should_shutdown = $true
+    }
+
+    # Если требуется малая или нулевая тяга - выключаем двигатель
+    if ($t_pct_target -eq 0 -or $t_pct_target -lt $t_min_pct) {
         $t_pct_target = 0
+        $should_shutdown = $true
     }
     else {
         if ($t_pct -eq 0) {
@@ -212,46 +250,60 @@ while ($h -gt 0) {
     }
 
     # Устанавливаем команду управления двигателем
-    # Выключение - всегда мгновенно, изменение тяги - не чаще $throttle_interval
-    if ($t_pct_target -eq 0) {
-        $t_pct_commanded = 0
-        $throttle_cooldown = 0.0
-    } elseif ($throttle_cooldown -le 0) {
+    # Изменение тяги - не чаще $throttle_interval
+    if ($throttle_cooldown -le 0) {
         $t_pct_commanded = $t_pct_target
         $throttle_cooldown = $throttle_interval
     }
     $throttle_cooldown -= $dt
 
-    if ($m_fuel -le 0) { 
-        # Нет топлива - двигатель выключен
-        $t_pct_commanded = 0; 
-        $m_fuel = 0; 
+    if ($m_fuel -le 0) {
+        # Нет топлива - принудительное выключение
+        $should_shutdown = $true
+        $m_fuel = 0;
     }
 
-    # Симуляция состояний двигателя с задержкой зажигания
-    if ($t_pct_commanded -gt 0) {
-        if ($engine_state -eq "off") {
+    # Машина состояний двигателя: off / igniting / running / shutdown
+    if ($engine_state -eq "off") {
+        # Двигатель выключен
+        if ($t_pct_commanded -gt 0 -and -not $should_shutdown) {
             # Начинаем зажигание
             $engine_state = "igniting"
             $ignition_timer = 0.0
-        } elseif ($engine_state -eq "igniting") {
-            # Процесс зажигания
-            $ignition_timer += $dt
-            if ($ignition_timer -ge $throttle_lag) {
-                $engine_state = "running"
-            }
         }
-    } else {
-        # Команда на выключение
-        $engine_state = "off"
-        $ignition_timer = 0.0
-    }
-
-    # На самом деле реальная тяга зависит от состояния двигателя
-    if ($engine_state -eq "running") {
-        $t_pct = $t_pct_commanded
-    } else {
         $t_pct = 0
+
+    } elseif ($engine_state -eq "igniting") {
+        # Процесс зажигания
+        $ignition_timer += $dt
+        if ($ignition_timer -ge $throttle_lag) {
+            $engine_state = "running"
+        }
+        $t_pct = 0
+
+    } elseif ($engine_state -eq "running") {
+        # Двигатель работает
+        if ($should_shutdown) {
+            # Начинаем процедуру выключения
+            $engine_state = "shutdown"
+            $shutdown_timer = 0.0
+            $t_pct_at_shutdown = $t_pct
+        } else {
+            # Нормальная работа
+            $t_pct = $t_pct_commanded
+        }
+
+    } elseif ($engine_state -eq "shutdown") {
+        # Процесс выключения - тяга остаётся постоянной
+        $shutdown_timer += $dt
+        if ($shutdown_timer -ge $shutdown_thrust_decay) {
+            # Выключение завершено - мгновенное падение до 0
+            $engine_state = "off"
+            $t_pct = 0
+        } else {
+            # Тяга остаётся на уровне начала выключения
+            $t_pct = $t_pct_at_shutdown
+        }
     }
 
     $t_current = ($t_pct / 100.0) * $t_max
@@ -308,14 +360,52 @@ while ($h -gt 0) {
         Write-Host ([char]0x25CF + " Работает ") -ForegroundColor Green
     } elseif ($engine_state -eq "igniting") {
         Write-Host ([char]0x25D0 + " Зажигание") -ForegroundColor Yellow
+    } elseif ($engine_state -eq "shutdown") {
+        Write-Host ([char]0x25D1 + " Выключение") -ForegroundColor Red
     } else {
-        Write-Host ([char]0x25CB + " Выключен ") -ForegroundColor DarkGray
+        Write-Host ([char]0x25CB + " Выключен  ") -ForegroundColor DarkGray
     }
 
     Start-Sleep -Milliseconds 20
 }
 
 [Console]::CursorVisible = $true
+
+# Финальное состояние: модуль стоит на грунте
+# Грунт обеспечивает силу реакции опоры, равную весу модуля
+$h_final = 0.0
+$v_final = 0.0
+$t_pct_final = 0
+# Ускорение = сила реакции опоры / масса = m*g_moon / m = g_moon
+$g_force_final = $g_moon / $g_earth
+
+# Обновляем финальный дисплей
+[Console]::SetCursorPosition(0, 1)
+
+Write-Host ("ВЫСОТА:     {0,6:F1} м   " -f $h_final) -NoNewline -ForegroundColor White
+$hBar = Format-Bar $h_final $h_start 15
+Write-Host $hBar -ForegroundColor White
+
+Write-Host ("СКОРОСТЬ:   {0,6:F1} м/с " -f $v_final) -NoNewline -ForegroundColor White
+$vBar = Format-Bar ([Math]::Abs($v_final)) 60.0 15
+Write-Host $vBar -ForegroundColor White
+
+Write-Host ("ТЯГА:       {0,6:F1}%    " -f $t_pct_final) -NoNewline -ForegroundColor White
+$tBar = Format-Bar $t_pct_final 100.0 15
+Write-Host $tBar -ForegroundColor White
+
+Write-Host ("УСКОРЕНИЕ:  {0,6:F2} g   " -f $g_force_final) -NoNewline -ForegroundColor Yellow
+$gBar = Format-Bar $g_force_final ($a_limit_earth_g + 0.5) 15
+Write-Host $gBar -ForegroundColor Yellow
+
+Write-Host ("ТОПЛИВО:    {0,6:F0} кг  " -f $m_fuel) -NoNewline -ForegroundColor $(if ($m_fuel -lt 200) { "Red" } elseif ($m_fuel -lt 500) { "Yellow" } else { "White" })
+$fBar = Format-Bar $m_fuel $m_fuel_start 15
+Write-Host $fBar -ForegroundColor $(if ($m_fuel -lt 200) { "Red" } elseif ($m_fuel -lt 500) { "Yellow" } else { "White" })
+
+Write-Host "ДВИГАТЕЛЬ: " -NoNewline -ForegroundColor White
+Write-Host ([char]0x25CB + " Выключен  ") -ForegroundColor DarkGray
+
+Write-Host ""
 
 Write-Host ("Скорость в момент посадки: {0,7:F2} м/с" -f $v)
 Write-Host ("Максимальная скорость:     {0,7:F2} м/с" -f $max_v)
@@ -341,7 +431,7 @@ $marginBottom = 30 # для подписей оси X
 
 # Общая ширина и высота изображения
 $imgWidth = $graphWidth + $marginLeft + $marginRight
-$imgHeight = 510 + $marginBottom  # последний график заканчивается на y=510 (430+80)
+$imgHeight = 390 + $marginBottom  # последний график заканчивается на y=390 (310+80)
 
 # Создаём bitmap и graphics
 $bmp = New-Object System.Drawing.Bitmap($imgWidth, $imgHeight)
@@ -369,7 +459,7 @@ $penOff = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60, 60,
 $penIgniting = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 4)
 $penRunning = New-Object System.Drawing.Pen([System.Drawing.Color]::Yellow, 2)
 $penFullThrust = New-Object System.Drawing.Pen([System.Drawing.Color]::Red, 2)
-$penThrust = New-Object System.Drawing.Pen([System.Drawing.Color]::Cyan, 2)
+$penShutdown = New-Object System.Drawing.Pen([System.Drawing.Color]::Magenta, 2)
 $penG = New-Object System.Drawing.Pen([System.Drawing.Color]::LimeGreen, 2)
 $penMoonG = New-Object System.Drawing.Pen([System.Drawing.Color]::Orange, 2)
 $penMoonG.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
@@ -508,6 +598,9 @@ for ($i = 0; $i -lt ($points.Count - 1); $i++) {
             $pen = $penRunning
         }
     }
+    elseif ($state -eq "shutdown") {
+        $pen = $penShutdown
+    }
 
     $g.DrawLine($pen, $x1, $y1, $x2, $y2)
 }
@@ -526,7 +619,7 @@ $g.DrawString(("Касание:  {0,5:F2} м/с" -f $v), $fontSmall, $brushWhite
 # Легенда состояний двигателя
 
 $legendX = $graphX + 10
-$legendY = $graphY + $graphHeight - 75
+$legendY = $graphY + $graphHeight - 90
 $g.DrawLine($penOff, $legendX, $legendY, $legendX + 20, $legendY)
 $g.DrawString("Выключен", $fontSmall, $brushDarkGray, $legendX + 25, $legendY - 6)
 $g.DrawLine($penIgniting, $legendX, $legendY + 15, $legendX + 20, $legendY + 15)
@@ -535,16 +628,14 @@ $g.DrawLine($penRunning, $legendX, $legendY + 30, $legendX + 20, $legendY + 30)
 $g.DrawString("Работает", $fontSmall, $brushYellow, $legendX + 25, $legendY + 24)
 $g.DrawLine($penFullThrust, $legendX, $legendY + 45, $legendX + 20, $legendY + 45)
 $g.DrawString("Полная тяга", $fontSmall, $brushRed, $legendX + 25, $legendY + 39)
+$g.DrawLine($penShutdown, $legendX, $legendY + 60, $legendX + 20, $legendY + 60)
+$g.DrawString("Выключение", $fontSmall, $brushWhite, $legendX + 25, $legendY + 54)
 
-# График 2: Тяга
-
-New-Graph $g $history "Thrust" $marginLeft 310 $graphWidth 80 0 100.0 $penThrust "ТЯГА" "%"
-
-# График 3: Ускорение
+# График 2: Ускорение
 
 # Рисуем линию лунного g (до отрисовки самого графика)
 $gGraphX = $marginLeft
-$gGraphY = 430
+$gGraphY = 310
 $gGraphWidth = $graphWidth
 $gGraphHeight = 80
 $gMinVal = 0
