@@ -345,11 +345,45 @@ $brushYellow = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::Yell
 
 # Перья для графиков
 $penGrid = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(50, 60, 70), 1)
+$penTick = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(40, 50, 55), 1)
 $penOff = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60, 60, 60), 2)
 $penIgniting = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 4)
 $penRunning = New-Object System.Drawing.Pen([System.Drawing.Color]::Yellow, 2)
 $penThrust = New-Object System.Drawing.Pen([System.Drawing.Color]::Cyan, 2)
 $penG = New-Object System.Drawing.Pen([System.Drawing.Color]::LimeGreen, 2)
+
+# Функция рисования оси времени (мелкие засечки + крупные с подписями)
+function Draw-TimeAxis {
+    param($graphics, $x, $y, $width, $height, $tTotal)
+
+    # Крупный шаг: 10, 20, 30, 50, 100... (целимся в 5-8 крупных меток)
+    $raw = $tTotal / 6
+    $mag = [Math]::Pow(10, [Math]::Floor([Math]::Log10($raw)))
+    $norm = $raw / $mag
+    if ($norm -lt 1.5) { $majorStep = $mag }
+    elseif ($norm -lt 3.5) { $majorStep = 2 * $mag }
+    elseif ($norm -lt 7.5) { $majorStep = 5 * $mag }
+    else { $majorStep = 10 * $mag }
+
+    # Мелкие засечки каждую секунду (короткие линии снизу графика)
+    for ($ts = 1; $ts -lt $tTotal; $ts++) {
+        $xPos = $x + ($ts / $tTotal) * $width
+        $graphics.DrawLine($penTick, $xPos, $y + $height - 4, $xPos, $y + $height)
+    }
+
+    # Сетка каждые 10 секунд
+    for ($ts = 10; $ts -lt $tTotal; $ts += 10) {
+        $xPos = $x + ($ts / $tTotal) * $width
+        $graphics.DrawLine($penTick, $xPos, $y, $xPos, $y + $height)
+    }
+
+    # Крупные засечки с подписями
+    for ($ts = $majorStep; $ts -lt $tTotal; $ts += $majorStep) {
+        $xPos = $x + ($ts / $tTotal) * $width
+        $graphics.DrawLine($penGrid, $xPos, $y, $xPos, $y + $height)
+        $graphics.DrawString("{0:F0}с" -f $ts, $fontSmall, $brushGray, $xPos - 10, $y + $height + 2)
+    }
+}
 
 # Функция для рисования графика
 
@@ -382,6 +416,9 @@ function New-Graph {
     $timePoints = $data | Select-Object -ExpandProperty Time
 
     if ($points.Count -lt 2) { return }
+
+    # Метки по оси X (секунды)
+    Draw-TimeAxis $graphics $x $y $width $height $timePoints[-1]
 
     $range = $maxVal - $minVal
     if ($range -eq 0) { $range = 1 }
@@ -420,6 +457,10 @@ for ($i = 0; $i -le 5; $i++) {
     $val = $h_start - ($h_start / 5) * $i
     $g.DrawString("{0:F0}м" -f $val, $fontSmall, $brushGray, $graphX - 50, $yPos - 9)
 }
+
+# Ось времени для графика высоты
+$tTotal = ($history | Select-Object -ExpandProperty Time)[-1]
+Draw-TimeAxis $g $graphX $graphY $graphWidth $graphHeight $tTotal
 
 # Рисуем линию высоты с раскраской по состоянию двигателя
 
