@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Расчет расхода топлива кг/с в зависимости от процента тяги двигателя LM-5
 .DESCRIPTION
@@ -43,7 +43,7 @@ function Get-ThrustEasing {
 
 <#
 .SYNOPSIS
-Функция для отрисовки шкалы специальными символами Fira Code
+Функция для отрисовки шкалы символами ASCII
 #>
 function Format-Bar {
     param(
@@ -57,26 +57,11 @@ function Format-Bar {
     if ($ratio -lt 0) { $ratio = 0.0 }
     if ($ratio -gt 1) { $ratio = 1.0 }
 
-    [int]$widthInner = $width - 2  # -2 для символов границ
-    [int]$filled = [Math]::Round($ratio * $widthInner)
-    [int]$empty = $widthInner - $filled
+    [int]$filled = [Math]::Round($ratio * $width)
+    [int]$empty = $width - $filled
 
-    if ($ratio -gt 0) {
-        $bar = [char]0xEE03  # начало: значение > 0
-    }
-    else {
-        $bar = [char]0xEE00  # начало: значение = 0
-    }
-
-    $bar += [string]([char]0xEE04) * $filled # заполненные блоки
-    $bar += [string]([char]0xEE01) * $empty  # пустые блоки
-
-    if ($ratio -ge 1) {
-        $bar += [char]0xEE05  # конец: значение = max
-    }
-    else {
-        $bar += [char]0xEE02  # конец: значение < max
-    }
+    $bar = [string]"#" * $filled
+    $bar += [string][char]0x00B7 * $empty
 
     return $bar
 }
@@ -99,47 +84,47 @@ function Format-Scales {
         [EngineStatus]$EngineState
     )
 
-    $color = if ($Height -lt 2) { "Red" } elseif ($Height -lt 10) { "Yellow" } else { "White" }
-    Write-Host ("ALT:        {0,6:F1} m   " -f $Height) -NoNewline -ForegroundColor $color
+    $color = if ($Height -lt 2) { "DarkGreen" } elseif ($Height -lt 10) { "DarkGreen" } else { "Green" }
+    Write-Host ("ВЫСОТА:     {0,6:F1} м   " -f $Height) -NoNewline -ForegroundColor $color
     $hBar = Format-Bar $Height $HeightMax 15
     Write-Host $hBar -ForegroundColor $color
 
     $vAbs = [Math]::Abs($Velocity)
-    $color = if ($vAbs -gt 100) { "Red" } elseif ($vAbs -gt 45) { "Yellow" } else { "White" }
-    Write-Host ("VEL:        {0,6:F1} m/s " -f $Velocity) -NoNewline -ForegroundColor $color
+    $color = if ($vAbs -gt 100) { "DarkGreen" } elseif ($vAbs -gt 45) { "DarkGreen" } else { "Green" }
+    Write-Host ("СКОРОСТЬ:   {0,6:F1} м/с " -f $Velocity) -NoNewline -ForegroundColor $color
     $vBar = Format-Bar $vAbs $VelocityMax 15
     Write-Host $vBar -ForegroundColor $color
 
-    $color = if ($ThrustPct -lt 10) { "White" } elseif ($ThrustPct -le 60) { "Yellow" } else { "Red" }
-    Write-Host ("THR:        {0,6:F1}%    " -f $ThrustPct) -NoNewline -ForegroundColor $color
+    $color = if ($ThrustPct -lt 10) { "Green" } elseif ($ThrustPct -le 60) { "Green" } else { "DarkGreen" }
+    Write-Host ("ТЯГА:       {0,6:F1}%    " -f $ThrustPct) -NoNewline -ForegroundColor $color
     $tBar = Format-Bar $ThrustPct 100.0 15
     Write-Host $tBar -ForegroundColor $color
 
-    $color = if ($Acceleration -gt 1.0) { "Red" } elseif ($Acceleration -gt 0.2) { "Yellow" } else { "White" }
-    Write-Host ("ACC:        {0,6:F2} g   " -f $Acceleration) -NoNewline -ForegroundColor $color
+    $color = if ($Acceleration -gt 1.0) { "DarkGreen" } elseif ($Acceleration -gt 0.2) { "Green" } else { "Green" }
+    Write-Host ("УСКОРЕНИЕ:  {0,6:F2} g   " -f $Acceleration) -NoNewline -ForegroundColor $color
     $gBar = Format-Bar $Acceleration $AccelerationMax 15
     Write-Host $gBar -ForegroundColor $color
 
-    $color = if ($FuelMass -lt 200) { "Red" } elseif ($FuelMass -lt 500) { "Yellow" } else { "White" }
-    Write-Host ("FUEL:       {0,6:F0} kg  " -f $FuelMass) -NoNewline -ForegroundColor $color
+    $color = if ($FuelMass -lt 200) { "DarkGreen" } elseif ($FuelMass -lt 500) { "DarkGreen" } else { "Green" }
+    Write-Host ("ТОПЛИВО:    {0,6:F0} кг  " -f $FuelMass) -NoNewline -ForegroundColor $color
     $fBar = Format-Bar $FuelMass $FuelMassMax 15
     Write-Host $fBar -ForegroundColor $color
 
-    Write-Host "ENGINE:    " -NoNewline -ForegroundColor White
+    Write-Host "ДВИГАТЕЛЬ: " -NoNewline -ForegroundColor Green
     if ($EngineState -eq [EngineStatus]::Active) {
-        Write-Host ([char]0x25CF + " Active    ") -ForegroundColor White
+        Write-Host ("* Работает         ") -ForegroundColor Green
     }
     elseif ($EngineState -eq [EngineStatus]::Throttling) {
-        Write-Host ([char]0x25CF + " Throttling") -ForegroundColor White
+        Write-Host ("* Регулировка тяги ") -ForegroundColor Green
     }
     elseif ($EngineState -eq [EngineStatus]::Ignition) {
-        Write-Host ([char]0x25D0 + " Ignition  ") -ForegroundColor Yellow
+        Write-Host ("~ Зажигание        ") -ForegroundColor DarkGreen
     }
     elseif ($EngineState -eq [EngineStatus]::Cutoff) {
-        Write-Host ([char]0x25D1 + " Cutoff    ") -ForegroundColor Yellow
+        Write-Host ("~ Гашение          ") -ForegroundColor DarkGreen
     }
     else {
-        Write-Host ([char]0x25CB + " Off       ") -ForegroundColor DarkGray
+        Write-Host ("  Выключен         ") -ForegroundColor DarkGreen
     }
 }
 
@@ -150,7 +135,7 @@ function Format-Scales {
 function New-TimeAxis {
     param(
         [Parameter(Mandatory = $true)]
-        [System.Drawing.Graphics]$Graphics,
+        $Graphics,
         [Parameter(Mandatory = $true)]
         [double]$X,
         [Parameter(Mandatory = $true)]
@@ -179,6 +164,6 @@ function New-TimeAxis {
     for ($ts = 10; $ts -lt $TTotal; $ts += 10) {
         $xPos = $X + ($ts / $TTotal) * $Width
         $Graphics.DrawLine($penGrid, $xPos, $Y, $xPos, $Y + $Height)
-        $Graphics.DrawString("{0:F0}" -f $ts, $fontSmall, $brushGray, $xPos - 10, $Y + $Height + 2)
+        $Graphics.DrawString("{0:F0}" -f $ts, $fontSmall, $brushAxis, $xPos - 10, $Y + $Height + 2)
     }
 }

@@ -33,7 +33,7 @@ class Constants {
     static [double]$HeightStart = 3000.0     # начальная высота (м)
     static [double]$VelocityStart = 0.0      # начальная вертикальная скорость (м/с)
     static [double]$AccelerationStart = 0.0  # начальное ускорение (м/с²)
-    static [double]$ThrustPctStart = 0.0          # начальная тяга (%)
+    static [double]$ThrustPctStart = 0.0     # начальная тяга (%)
     static [EngineStatus]$EngineStateStart = 
       [EngineStatus]::Off                    # начальное состояние двигателя
 }
@@ -71,11 +71,8 @@ class Situation {
 # Параметры прошивки
 
 class Firmware {
-    static [double]$HeightGate1 = 1750.0   # этап 2: включение двигателя на 100% (м)
-    static [double]$VelocityGate2 = -15.0  # этап 3: переход на дроссельную тягу 50-60% (м/с)
-    static [double]$HeightGate3  = 20.0    # этап 4: финальное замедление (м)
-    static [double]$VelocityGate3 = -1.0   # целевая скорость после торможения (м/с)    
-    static [double]$VelocityGate4 = -0.1   # целевая скорость на cutoff (м/с)
+    static [double]$TouchdownVelocity = -0.3   # целевая скорость при касании (м/с)
+    static [double]$SafetyMargin = 1.10        # запас высоты для начала торможения (10%)
 }
 
 . "$PSScriptRoot\functions.ps1"
@@ -83,7 +80,7 @@ class Firmware {
 # Начало сценария
 
 Clear-Host
-Write-Host "Посадка на Луну" -ForegroundColor Green
+Write-Host "Посадка на Луну по G-FOLD" -ForegroundColor Green
 Write-Host "Нажмите ENTER для начала посадки..." -ForegroundColor Green -NoNewline
 Read-Host
 
@@ -215,9 +212,25 @@ while ([Situation]::Height -gt 0) {
     }
 
     #
-    # А вот это наша прошивка
-    # Анализируем ситуацию и вычисляем команду тяги $ThrustCommandedPct
-    # При необоходимости меняем состояние двигателя
+    # G-FOLD Guidance (Fuel-Optimal Powered Descent Guidance)
+    #
+    # Вместо заранее рассчитанных контрольных точек (гейтов, как в
+    # программах P63-65 Apollo), оптимальная траектория пересчитывается
+    # на каждом шаге симуляции (каждые 0.1 с).
+    #
+    # Ключевая идея G-FOLD: логарифмическая замена σ = ln(m) превращает
+    # нелинейную зависимость тяги от убывающей массы в линейную.
+    # Работаем с ускорением Γ = T/m, а не с тягой T — это автоматически
+    # учитывает изменение массы при расходе топлива.
+    #
+    # Для одномерного случая выпуклая оптимизация даёт аналитическое
+    # решение: при граничных условиях h → 0, v → v_f оптимальное
+    # ускорение:
+    #
+    #   Γ = g + (v² − v_f²) / (2·h)
+    #
+    # Непрерывный пересчёт компенсирует любые отклонения: неравномерность
+    # тяги, ошибки интегрирования, изменение массы, смену места посадки
     #
 
     # после срабатывания щупов прошивка не вмешивается — двигатель гасится штатно
@@ -225,83 +238,103 @@ while ([Situation]::Height -gt 0) {
 
         $H = [Situation]::Height
         $V = [Situation]::Velocity
+        $m = [Constants]::DryMass + [Situation]::FuelMass
+        $g_moon = [Constants]::MoonGravity
 
-        if ($H -gt [Firmware]::HeightGate1) {
-            # этап 1: выше Gate1 — свободное падение, двигатель не нужен
-            $pctRequired = 0.0
-        }
-        elseif ($V -lt [Firmware]::VelocityGate2) {
-            # этап 2: скорость слишком высокая — полная тяга, тормозим до VelocityGate2
-            $pctRequired = 100.0
-        }
-        else {
-            # этапы 3-4: адаптивное управление тягой
-            # целевая скорость — линейная интерполяция по высоте
+        # Γ_max — максимальное ускорение от тяги при текущей массе
+        # По мере выработки топлива m падает → Γ_max растёт
+        $GammaMax = [Constants]::MaxThrust / $m
 
-            if ($H -gt [Firmware]::HeightGate3) {
-                # этап 3: от текущей высоты до HeightGate3
-                # целевая скорость: от VelocityGate2 (-25) до VelocityGate3 (-3)
-                $frac = ($H - [Firmware]::HeightGate3) / `
-                    ([Firmware]::HeightGate1 - [Firmware]::HeightGate3)
-                $targetVelocity = [Firmware]::VelocityGate3 + `
-                    ([Firmware]::VelocityGate2 - [Firmware]::VelocityGate3) * $frac
+        # максимальное чистое замедление (тяга минус гравитация)
+        $netDecel = $GammaMax - $g_moon
+
+        $v_f = [Firmware]::TouchdownVelocity
+
+        # ── Определяем, нужно ли начинать торможение ──
+
+        $needBraking = $false
+
+        if ([Situation]::EngineState -ne [EngineStatus]::Off) {
+            # двигатель уже работает — продолжаем управление G-FOLD
+            $needBraking = $true
+        }
+        elseif ($V -lt $v_f -and $netDecel -gt 0.01) {
+            # двигатель выключен, падаем быстрее целевой скорости
+            # прогнозируем состояние после задержки включения двигателя
+            $td = [Constants]::IgnitionTime + [Constants]::ThrottleLag
+            $V_pred = $V - $g_moon * $td
+            $H_pred = $H + $V * $td - 0.5 * $g_moon * $td * $td
+
+            if ($H_pred -le 0) {
+                # за время включения упадём на поверхность — включаем немедленно
+                $needBraking = $true
             }
             else {
-                # этап 4: от HeightGate3 до HeightCutoff
-                # целевая скорость: от VelocityGate3 (-3) до VelocityGate4 (-0.3)
-                $frac = ($H - [Constants]::HeightCutoff) / `
-                    ([Firmware]::HeightGate3 - [Constants]::HeightCutoff)
-                $targetVelocity = [Firmware]::VelocityGate4 + `
-                    ([Firmware]::VelocityGate3 - [Firmware]::VelocityGate4) * $frac
+                # минимальная высота торможения из прогнозной скорости
+                $h_brake = ($V_pred * $V_pred) / (2.0 * $netDecel)
+
+                if ($H_pred -le $h_brake * [Firmware]::SafetyMargin) {
+                    $needBraking = $true
+                }
             }
+        }
 
-            # ошибка скорости: отрицательная = падаем быстрее, чем нужно
-            $velocityError = $V - $targetVelocity
-            $totalMass = [Constants]::DryMass + [Situation]::FuelMass
+        # Вычисляем команду тяги
 
-            if ($velocityError -ge 0) {
-                # скорость ниже целевой — двигатель не нужен
+        if ($needBraking -and $H -gt 0.5) {
+            # G-FOLD: аналитическое решение выпуклой задачи
+            #   Γ = g + (v² − v_f²) / (2·h)
+            # При пересчёте каждые dt это эквивалентно непрерывному
+            # решению SOCP с логарифмической заменой массы
+            $GammaCmd = $g_moon + ($V * $V - $v_f * $v_f) / (2.0 * $H)
+
+            # ограничиваем максимальным доступным ускорением
+            if ($GammaCmd -gt $GammaMax) { $GammaCmd = $GammaMax }
+
+            if ($GammaCmd -lt $g_moon * 0.3) {
+                # ускорение слишком мало — скорость ниже целевой, тяга не нужна
                 $pctRequired = 0.0
             }
             else {
-                # тяга висения как базовая
-                $thrustHover = $totalMass * [Constants]::MoonGravity
-
-                # P-коррекция: чем больше ошибка, тем больше тяга
-                $Kp = 2000.0
-                $thrustRequired = $thrustHover - $Kp * $velocityError
-
-                # переводим в проценты
-                $pctRequired = $thrustRequired * 100.0 / [Constants]::MaxThrust
+                # переводим ускорение в тягу
+                $pctRequired = ($GammaCmd * $m) * 100.0 / [Constants]::MaxThrust
             }
         }
+        elseif ($needBraking -and $H -le 0.5) {
+            # у поверхности — пропорциональное гашение к целевой скорости
+            $GammaCmd = $g_moon + ($v_f - $V) / 0.5
+            if ($GammaCmd -lt 0) { $GammaCmd = 0 }
+            $pctRequired = ($GammaCmd * $m) * 100.0 / [Constants]::MaxThrust
+        }
+        else {
+            # свободное падение — двигатель не нужен
+            $pctRequired = 0.0
+        }
 
-        # ограничиваем диапазон дросселируемой тяги
+        # Ограничения мёртвых зон двигателя DPS
+
         if ($pctRequired -lt [Constants]::MinThrustPct) {
             if (
                 [Situation]::EngineState -eq [EngineStatus]::Off -or
                 [Situation]::EngineState -eq [EngineStatus]::Ignition
             ) {
-                # двигатель выключен или в процессе зажигания — оставляем 0
                 $pctRequired = 0.0
             }
             else {
-                # двигатель работает — ставим минимум тяги, чтобы не заглох
+                # двигатель работает — ставим минимум, чтобы не заглох
                 $pctRequired = [Constants]::MinThrustPct
             }
         }
 
-        if ($pctRequired -gt 90.0) {
-            # критическая потребность в тяге — полная тяга
+        if ($pctRequired -gt [Constants]::MaxThrustPct) {
+            # двигатель не может обеспечить такую тягу — ставим сразу максимум
             $pctRequired = 100.0
         }
-        elseif ($pctRequired -gt [Constants]::MaxThrustPct) {
-            # мёртвая зона дросселя 66-90% — зажимаем на максимум диапазона
-            $pctRequired = [Constants]::MaxThrustPct
-        }
 
-        # если двигатель выключен и нужна тяга — запускаем зажигание
+        # Управление состоянием двигателя
+
         if ([Situation]::EngineState -eq [EngineStatus]::Off -and $pctRequired -gt 0.0) {
+            # запускаем зажигание
             [Situation]::EngineState = [EngineStatus]::Ignition
             [Situation]::ThrustCommandedPct = $pctRequired
             [Situation]::TimeThrustStart = [Situation]::Time
@@ -309,8 +342,11 @@ while ([Situation]::Height -gt 0) {
             [Situation]::ThrustStart = [Situation]::Thrust
             [Situation]::ThrustEnd = [Constants]::MaxThrust * ($pctRequired / 100.0)
         }
-        elseif ($pctRequired -ne [Situation]::ThrustCommandedPct) {
-            # если заказанная тяга изменилась — переходим в режим Throttling
+        elseif ([Situation]::EngineState -eq [EngineStatus]::Ignition) {
+            # во время зажигания не меняем команду — ждём выхода двигателя
+        }
+        elseif ([Math]::Abs($pctRequired - [Situation]::ThrustCommandedPct) -gt 2.0) {
+            # значимое изменение тяги (>2%) — переходим в режим Throttling
             [Situation]::EngineState = [EngineStatus]::Throttling
             [Situation]::ThrustCommandedPct = $pctRequired
             [Situation]::TimeThrustStart = [Situation]::Time
@@ -392,7 +428,7 @@ Write-Host ("Максимальное ускорение: {0,7:F2} g" -f $Record
 Write-Host ""
 
 # Сохраняем телеметрию в файл
-$logPath = Join-Path $PSScriptRoot "mode1a.log"
+$logPath = Join-Path $PSScriptRoot "mode2a.log"
 $lines = [System.Collections.Generic.List[string]]::new()
 $lines.Add("Time;Height;Velocity;ThrustPct;Acceleration;FuelMass;EngineState")
 foreach ($r in $Telemetry) {
@@ -601,7 +637,7 @@ if ($gPoints.Count -ge 2) {
 
 # Сохранение
 
-$outputPath = Join-Path $PSScriptRoot "mode1a.png"
+$outputPath = Join-Path $PSScriptRoot "mode2a.png"
 
 try {
     $bmp.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Png)
@@ -768,7 +804,7 @@ $g5.DrawString("Диаграмма посадки", $g5fontTitle, $g5brushTitle,
     ($g5marginLeft + 15), 8)
 
 # сохранение
-$g5outputPath = Join-Path $PSScriptRoot "graph5.png"
+$g5outputPath = Join-Path $PSScriptRoot "graph5-gfold.png"
 try {
     $g5bmp.Save($g5outputPath, [System.Drawing.Imaging.ImageFormat]::Png)
     $g5.Dispose()

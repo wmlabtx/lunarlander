@@ -6,6 +6,7 @@ enum EngineStatus {
   Cutoff
 }
 
+Add-Type -AssemblyName System.Drawing
 . "$PSScriptRoot\functions.ps1"
 
 # Тест Get-LMFuelFlow
@@ -54,7 +55,7 @@ Write-Host "Test Format-Bar (width=20):" -ForegroundColor Cyan
 # Тест Get-ThrustEasing
 
 Write-Host ""
-Write-Host "Test Get-ThrustEasing (0 -> 1560 N over 1s):" -ForegroundColor Cyan
+Write-Host "Test Get-ThrustEasing (0 to 1560 N over 1s):" -ForegroundColor DarkGreen
 
 $tStart = 0.0
 $tEnd = 1.0
@@ -66,7 +67,7 @@ for ($time = 0.0; $time -le 1.001; $time += 0.1) {
   $bar = Format-Bar $thrust $thrEnd 20
   $ratio = $thrust / $thrEnd
   $filled = [Math]::Round($ratio * 18)
-  Write-Host (" t={0,4:F1}s T={1,7:F1} N [{2,2}/{3}] {4}" -f $time, $thrust, $filled, 18, $bar)
+  Write-Host (" t={0,4:F1}s T={1,7:F1} N [{2,2}/{3}] {4}" -f $time, $thrust, $filled, 18, $bar) -ForegroundColor Green
 }
 
 # Test Format-Scales
